@@ -1,4 +1,3 @@
-cat > install.sh << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 REPO_USER="semih155"
 REPO_NAME="termux-downloader"
@@ -22,4 +21,3 @@ curl -sL --max-time 4 "$RAW/VERSION" -o "$HOME/.termux-downloader-version" 2>/de
 echo "[4/4] Depolama izni isteniyor..."
 termux-setup-storage || true
 echo "✅ Kurulum tamamlandı!"
-EOF

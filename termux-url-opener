@@ -1,4 +1,3 @@
-cat > termux-url-opener << 'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 REPO_USER="semih155"
 REPO_NAME="termux-downloader"
@@ -9,6 +8,8 @@ VERSION_FILE="$HOME/.termux-downloader-version"
 SCRIPT_PATH="$HOME/.shortcuts/termux-url-opener"
 DOWNLOAD_DIR="$HOME/storage/downloads/TermuxIndirilenler"
 URL="$1"
+COOKIES_FILE="$HOME/twitter_cookies.txt"
+if [ -f "$COOKIES_FILE" ]; then COOKIE_ARGS=(--cookies "$COOKIES_FILE"); else COOKIE_ARGS=(); fi
 mkdir -p "$DOWNLOAD_DIR"
 echo -ne "\033]0;Samiullah Dilsuz - Termux Indirici\007"
 notify() { command -v termux-notification >/dev/null 2>&1 && termux-notification --title "Termux İndirici - Samiullah Dilsuz" --content "$1" || true; }
@@ -25,6 +26,53 @@ check_update() {
         fi
     fi
 }
+
+get_format_for_url() {
+    local url="$1"
+    local duration
+    duration=$(yt-dlp --no-warnings "${EXTRA_ARGS[@]}" --print duration "$url" 2>/dev/null | tail -1)
+    if [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        local dur_int=${duration%.*}
+        if [ "$dur_int" -gt 300 ]; then
+            local mins=$((dur_int/60))
+            local secs=$((dur_int%60))
+            echo
+            echo "⏱  Video uzunluğu: ${mins} dk ${secs} sn (5 dakikadan uzun)"
+            echo "Hangi kalitede indirmek istersin?"
+            echo "  1) 360p"
+            echo "  2) 480p"
+            echo "  3) 720p"
+            echo "  4) 1080p"
+            echo "  5) En yüksek kalite (best)"
+            echo "  6) Sadece ses (mp3)"
+            read -p "Seçim (1-6): " secim
+            case "$secim" in
+                1) FORMAT="bestvideo[height<=360]+bestaudio/best[height<=360]" ;;
+                2) FORMAT="bestvideo[height<=480]+bestaudio/best[height<=480]" ;;
+                3) FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
+                4) FORMAT="bestvideo[height<=1080]+bestaudio/best[height<=1080]" ;;
+                5) FORMAT="bestvideo+bestaudio/best" ;;
+                6) FORMAT="AUDIO_ONLY" ;;
+                *) FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
+            esac
+            return
+        fi
+    fi
+    FORMAT="bestvideo+bestaudio/best"
+}
+
+download_with_format() {
+    local url="$1"
+    local outtpl="$2"
+    if [ "$FORMAT" = "AUDIO_ONLY" ]; then
+        yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" "${EXTRA_ARGS[@]}" \
+            -x --audio-format mp3 -o "$outtpl" "$url"
+    else
+        yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" "${EXTRA_ARGS[@]}" \
+            -f "$FORMAT" --merge-output-format mp4 -o "$outtpl" "$url"
+    fi
+}
+
 clear
 echo "══════════════════════════════════════"
 echo "   TERMUX OTOMATİK İNDİRİCİ"
@@ -36,21 +84,33 @@ if [ -z "$URL" ]; then echo "Hata: URL alınamadı."; read -p "Enter'a bas..." _
 echo "Gelen link: $URL"
 notify "İndirme başlatılıyor..."
 PT="download:⬇️  %(progress._percent_str)s | Hız: %(progress._speed_str)s | Kalan: %(progress._eta_str)s"
+
 if echo "$URL" | grep -Eq 'tiktok\.com/@[^/]+/?($|\?)'; then
-    echo ">> TikTok PROFİL - toplu indiriliyor"; notify "TikTok profili toplu indiriliyor..."
+    echo ">> TikTok PROFİL - toplu indiriliyor (otomatik en yüksek kalite)"
+    notify "TikTok profili toplu indiriliyor..."
+    EXTRA_ARGS=()
     yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "$DOWNLOAD_DIR/TikTok/%(uploader)s/%(upload_date)s - %(title).60s.%(ext)s" --download-archive "$DOWNLOAD_DIR/TikTok/indirilenler.txt" --ignore-errors "$URL"
     notify "TikTok profili tamamlandı ✅"
 elif echo "$URL" | grep -Eq 'tiktok\.com'; then
-    echo ">> TikTok video"; notify "TikTok videosu indiriliyor..."
-    yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "$DOWNLOAD_DIR/TikTok/%(uploader)s/%(title).80s.%(ext)s" "$URL"
+    echo ">> TikTok video - süre kontrol ediliyor..."
+    notify "TikTok videosu indiriliyor..."
+    EXTRA_ARGS=()
+    get_format_for_url "$URL"
+    download_with_format "$URL" "$DOWNLOAD_DIR/TikTok/%(uploader)s/%(title).80s.%(ext)s"
     notify "TikTok tamamlandı ✅"
 elif echo "$URL" | grep -Eq 'facebook\.com|fb\.watch'; then
-    echo ">> Facebook"; notify "Facebook videosu indiriliyor..."
-    yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "$DOWNLOAD_DIR/Facebook/%(title).80s.%(ext)s" "$URL"
+    echo ">> Facebook - süre kontrol ediliyor..."
+    notify "Facebook videosu indiriliyor..."
+    EXTRA_ARGS=()
+    get_format_for_url "$URL"
+    download_with_format "$URL" "$DOWNLOAD_DIR/Facebook/%(title).80s.%(ext)s"
     notify "Facebook tamamlandı ✅"
 elif echo "$URL" | grep -Eq 'twitter\.com|x\.com'; then
-    echo ">> Twitter/X"; notify "Twitter/X videosu indiriliyor..."
-    yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress --progress-template "$PT" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "$DOWNLOAD_DIR/Twitter/%(uploader)s - %(title).60s.%(ext)s" "$URL"
+    echo ">> Twitter/X - süre kontrol ediliyor..."
+    notify "Twitter/X videosu indiriliyor..."
+    EXTRA_ARGS=("${COOKIE_ARGS[@]}")
+    get_format_for_url "$URL"
+    download_with_format "$URL" "$DOWNLOAD_DIR/Twitter/%(uploader)s - %(title).60s.%(ext)s"
     notify "Twitter/X tamamlandı ✅"
 elif echo "$URL" | grep -Eq 'youtube\.com|youtu\.be'; then
     echo ">> YouTube"
@@ -66,18 +126,18 @@ elif echo "$URL" | grep -Eq 'youtube\.com|youtu\.be'; then
         *) FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
     esac
     notify "YouTube indiriliyor..."
-    if [ "$FORMAT" = "AUDIO_ONLY" ]; then
-        yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" -x --audio-format mp3 -o "$DOWNLOAD_DIR/YouTube/%(title).80s.%(ext)s" "$URL"
-    else
-        yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" -f "$FORMAT" --merge-output-format mp4 -o "$DOWNLOAD_DIR/YouTube/%(title).80s.%(ext)s" "$URL"
-    fi
+    EXTRA_ARGS=()
+    download_with_format "$URL" "$DOWNLOAD_DIR/YouTube/%(title).80s.%(ext)s"
     notify "YouTube tamamlandı ✅"
 else
-    echo ">> Genel site"; notify "Video indiriliyor..."
+    echo ">> Genel site - süre kontrol ediliyor..."
+    notify "Video indiriliyor..."
     SITE=$(echo "$URL" | sed -E 's~https?://(www\.)?([^/]+)/.*~\2~')
-    yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "$DOWNLOAD_DIR/$SITE/%(title).80s.%(ext)s" "$URL"
+    EXTRA_ARGS=()
+    get_format_for_url "$URL"
+    download_with_format "$URL" "$DOWNLOAD_DIR/$SITE/%(title).80s.%(ext)s"
     notify "İndirme tamamlandı ✅"
 fi
+
 echo "İşlem bitti — Samiullah Dilsuz | Termux İndirici"
 sleep 2
-EOF
