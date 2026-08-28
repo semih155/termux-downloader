@@ -96,7 +96,7 @@ elif echo "$URL" | grep -Eq 'tiktok\.com'; then
     notify "TikTok videosu indiriliyor..."
     EXTRA_ARGS=()
     get_format_for_url "$URL"
-    download_with_format "$URL" "$DOWNLOAD_DIR/TikTok/%(uploader)s/%(title).80s.%(ext)s"
+    download_with_format "$URL" "$DOWNLOAD_DIR/TikTok/%(title).80s.%(ext)s"
     notify "TikTok tamamlandı ✅"
 elif echo "$URL" | grep -Eq 'facebook\.com|fb\.watch'; then
     echo ">> Facebook - süre kontrol ediliyor..."
