@@ -91,20 +91,23 @@ if echo "$URL" | grep -Eq 'tiktok\.com/@[^/]+/?($|\?)'; then
     EXTRA_ARGS=()
     yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "$DOWNLOAD_DIR/TikTok/%(uploader)s/%(upload_date)s - %(title).60s.%(ext)s" --download-archive "$DOWNLOAD_DIR/TikTok/indirilenler.txt" --ignore-errors "$URL"
     notify "TikTok profili tamamlandı ✅"
+
 elif echo "$URL" | grep -Eq 'tiktok\.com'; then
-    echo ">> TikTok video - süre kontrol ediliyor..."
+    echo ">> TikTok video - en yüksek kalitede indiriliyor..."
     notify "TikTok videosu indiriliyor..."
     EXTRA_ARGS=()
-    get_format_for_url "$URL"
+    FORMAT="bestvideo+bestaudio/best"
     download_with_format "$URL" "$DOWNLOAD_DIR/TikTok/%(title).80s.%(ext)s"
     notify "TikTok tamamlandı ✅"
+
 elif echo "$URL" | grep -Eq 'facebook\.com|fb\.watch'; then
-    echo ">> Facebook - süre kontrol ediliyor..."
+    echo ">> Facebook - en yüksek kalitede indiriliyor..."
     notify "Facebook videosu indiriliyor..."
     EXTRA_ARGS=()
-    get_format_for_url "$URL"
+    FORMAT="bestvideo+bestaudio/best"
     download_with_format "$URL" "$DOWNLOAD_DIR/Facebook/%(title).80s.%(ext)s"
     notify "Facebook tamamlandı ✅"
+
 elif echo "$URL" | grep -Eq 'twitter\.com|x\.com'; then
     echo ">> Twitter/X - süre kontrol ediliyor..."
     notify "Twitter/X videosu indiriliyor..."
@@ -112,6 +115,7 @@ elif echo "$URL" | grep -Eq 'twitter\.com|x\.com'; then
     get_format_for_url "$URL"
     download_with_format "$URL" "$DOWNLOAD_DIR/Twitter/%(uploader)s - %(title).60s.%(ext)s"
     notify "Twitter/X tamamlandı ✅"
+
 elif echo "$URL" | grep -Eq 'youtube\.com|youtu\.be'; then
     echo ">> YouTube"
     echo "1)360p 2)480p 3)720p 4)1080p 5)En yüksek 6)mp3"
@@ -129,6 +133,7 @@ elif echo "$URL" | grep -Eq 'youtube\.com|youtu\.be'; then
     EXTRA_ARGS=()
     download_with_format "$URL" "$DOWNLOAD_DIR/YouTube/%(title).80s.%(ext)s"
     notify "YouTube tamamlandı ✅"
+
 else
     echo ">> Genel site - süre kontrol ediliyor..."
     notify "Video indiriliyor..."
