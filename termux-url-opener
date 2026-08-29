@@ -7,7 +7,11 @@ RAW="https://raw.githubusercontent.com/$REPO_USER/$REPO_NAME/$BRANCH"
 VERSION_FILE="$HOME/.termux-downloader-version"
 SCRIPT_PATH="$HOME/.shortcuts/termux-url-opener"
 DOWNLOAD_DIR="$HOME/storage/downloads/TermuxIndirilenler"
-URL="$1"
+RAW_INPUT="$1"
+URL=$(printf '%s\n' "$RAW_INPUT" | grep -oE 'https?://[^[:space:]]+' | head -1)
+if [ -z "$URL" ]; then
+    URL="$RAW_INPUT"
+fi
 COOKIES_FILE="$HOME/twitter_cookies.txt"
 if [ -f "$COOKIES_FILE" ]; then COOKIE_ARGS=(--cookies "$COOKIES_FILE"); else COOKIE_ARGS=(); fi
 mkdir -p "$DOWNLOAD_DIR"
