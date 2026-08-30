@@ -19,6 +19,13 @@ echo -ne "\033]0;Samiullah Dilsuz - Termux Indirici\007"
 notify() { command -v termux-notification >/dev/null 2>&1 && termux-notification --title "Termux İndirici - Samiullah Dilsuz" --content "$1" || true; }
 check_update() {
     command -v curl >/dev/null 2>&1 || return 0
+    LAST_CHECK_FILE="$HOME/.termux-downloader-lastcheck"
+    NOW=$(date +%s)
+    LAST_CHECK=$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo 0)
+    if [ $((NOW - LAST_CHECK)) -lt 86400 ]; then
+        return 0
+    fi
+    echo "$NOW" > "$LAST_CHECK_FILE"
     REMOTE_VERSION=$(curl -sL --max-time 4 "$RAW/VERSION" 2>/dev/null || echo "")
     [ -z "$REMOTE_VERSION" ] && return 0
     LOCAL_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "0")
