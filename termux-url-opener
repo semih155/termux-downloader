@@ -100,7 +100,7 @@ elif echo "$URL" | grep -Eq 'tiktok\.com'; then
     echo ">> TikTok video - en yüksek kalitede indiriliyor..."
     notify "TikTok videosu indiriliyor..."
     EXTRA_ARGS=()
-    FORMAT="bestvideo+bestaudio/best"
+    FORMAT="best/bestvideo+bestaudio"
     download_with_format "$URL" "$DOWNLOAD_DIR/TikTok/%(title).80s.%(ext)s"
     notify "TikTok tamamlandı ✅"
 
