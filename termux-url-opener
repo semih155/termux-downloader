@@ -16,7 +16,7 @@ COOKIES_FILE="$HOME/twitter_cookies.txt"
 if [ -f "$COOKIES_FILE" ]; then COOKIE_ARGS=(--cookies "$COOKIES_FILE"); else COOKIE_ARGS=(); fi
 mkdir -p "$DOWNLOAD_DIR"
 echo -ne "\033]0;Samiullah Dilsuz - Termux Indirici\007"
-notify() { command -v termux-notification >/dev/null 2>&1 && termux-notification --title "Termux İndirici - Samiullah Dilsuz" --content "$1" || true; }
+notify() { command -v termux-notification >/dev/null 2>&1 && (timeout 2 termux-notification --title "Termux İndirici - Samiullah Dilsuz" --content "$1" >/dev/null 2>&1 &) ; true; }
 check_update() {
     command -v curl >/dev/null 2>&1 || return 0
     LAST_CHECK_FILE="$HOME/.termux-downloader-lastcheck"
