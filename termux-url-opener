@@ -3,8 +3,6 @@ REPO_USER="semih155"
 REPO_NAME="termux-downloader"
 BRANCH="main"
 set -e
-RAW="https://raw.githubusercontent.com/$REPO_USER/$REPO_NAME/$BRANCH"
-VERSION_FILE="$HOME/.termux-downloader-version"
 SCRIPT_PATH="$HOME/.shortcuts/termux-url-opener"
 DOWNLOAD_DIR="$HOME/storage/downloads/TermuxIndirilenler"
 RAW_INPUT="$1"
@@ -12,24 +10,12 @@ URL=$(printf '%s\n' "$RAW_INPUT" | grep -oE 'https?://[^[:space:]]+' | head -1)
 if [ -z "$URL" ]; then
     URL="$RAW_INPUT"
 fi
+
 COOKIES_FILE="$HOME/twitter_cookies.txt"
 if [ -f "$COOKIES_FILE" ]; then COOKIE_ARGS=(--cookies "$COOKIES_FILE"); else COOKIE_ARGS=(); fi
 mkdir -p "$DOWNLOAD_DIR"
 echo -ne "\033]0;Samiullah Dilsuz - Termux Indirici\007"
 notify() { command -v termux-notification >/dev/null 2>&1 && termux-notification --title "Termux İndirici - Samiullah Dilsuz" --content "$1" || true; }
-check_update() {
-    command -v curl >/dev/null 2>&1 || return 0
-    REMOTE_VERSION=$(curl -sL --max-time 4 "$RAW/VERSION" 2>/dev/null || echo "")
-    [ -z "$REMOTE_VERSION" ] && return 0
-    LOCAL_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "0")
-    if [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
-        echo "🔄 Güncelleme bulundu ($LOCAL_VERSION -> $REMOTE_VERSION)..."
-        if curl -sL "$RAW/termux-url-opener" -o "$SCRIPT_PATH.tmp"; then
-            mv "$SCRIPT_PATH.tmp" "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"; echo "$REMOTE_VERSION" > "$VERSION_FILE"
-            echo "✅ Güncellendi, yeniden başlatılıyor..."; exec bash "$SCRIPT_PATH" "$URL"
-        fi
-    fi
-}
 
 get_format_for_url() {
     local url="$1"
@@ -80,17 +66,17 @@ download_with_format() {
 clear
 echo "══════════════════════════════════════"
 echo "   TERMUX OTOMATİK İNDİRİCİ"
-echo "   v2.0.0"
+echo "   v2.0.3 (Stabil)"
 echo "   Geliştirici: Samiullah Dilsuz"
 echo "══════════════════════════════════════"
-check_update
+
 if [ -z "$URL" ]; then echo "Hata: URL alınamadı."; read -p "Enter'a bas..." _; exit 1; fi
 echo "Gelen link: $URL"
 notify "İndirme başlatılıyor..."
 PT="download:⬇️  %(progress._percent_str)s | Hız: %(progress._speed_str)s | Kalan: %(progress._eta_str)s"
 
-if echo "$URL" | grep -Eq 'tiktok\.com/@[^/]+/?($|\?)'; then
-    echo ">> TikTok PROFİL - Toplu İndirme Modu"
+if echo "$URL" | grep -E -q 'tiktok\.com/@[^/?]+'; then
+    echo ">> TikTok PROFİL - toplu indiriliyor"
     echo
     echo "Kaç video indirmek istersin?"
     echo "  (Hepsini indirmek için Boş bırakıp Enter'a bas)"
@@ -98,30 +84,26 @@ if echo "$URL" | grep -Eq 'tiktok\.com/@[^/]+/?($|\?)'; then
 
     echo
     echo "İndirme Sırası:"
-    echo "  1) En Yeni videolardan başlayarak (Varsayılan)"
-    echo "  2) En Eski videolardan başlayarak"
+    echo "  1) En Yeni videolardan başla (Varsayılan)"
+    echo "  2) En Eski videolardan başla"
     read -p "Seçim (1-2): " V_ORDER
 
     TK_OPTS=()
-    
-    # Adet sınırı ayarı
     if [ -n "$V_COUNT" ] && [[ "$V_COUNT" =~ ^[0-9]+$ ]]; then
         TK_OPTS+=("--max-downloads" "$V_COUNT")
     fi
-
-    # Sıralama ayarı
     if [ "$V_ORDER" = "2" ]; then
         TK_OPTS+=("--playlist-reverse")
     fi
 
-    notify "TikTok profili indiriliyor..."
+    notify "TikTok profili toplu indiriliyor..."
+    EXTRA_ARGS=()
     yt-dlp --no-warnings --concurrent-fragments 8 --newline --progress-template "$PT" \
         -f "bestvideo+bestaudio/best" --merge-output-format mp4 \
         "${TK_OPTS[@]}" \
         -o "$DOWNLOAD_DIR/TikTok/%(uploader)s/%(upload_date)s - %(title).60s.%(ext)s" \
         --download-archive "$DOWNLOAD_DIR/TikTok/indirilenler.txt" \
         --ignore-errors "$URL"
-        
     notify "TikTok profili tamamlandı ✅"
 
 elif echo "$URL" | grep -Eq 'tiktok\.com'; then
