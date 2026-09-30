@@ -14,6 +14,8 @@ if [ -z "$URL" ]; then
 fi
 COOKIES_FILE="$HOME/twitter_cookies.txt"
 if [ -f "$COOKIES_FILE" ]; then COOKIE_ARGS=(--cookies "$COOKIES_FILE"); else COOKIE_ARGS=(); fi
+YT_COOKIES_FILE="$HOME/youtube_cookies.txt"
+if [ -f "$YT_COOKIES_FILE" ]; then YT_COOKIE_ARGS=(--cookies "$YT_COOKIES_FILE"); else YT_COOKIE_ARGS=(); fi
 mkdir -p "$DOWNLOAD_DIR"
 echo -ne "\033]0;Samiullah Dilsuz - Termux Indirici\007"
 notify() { command -v termux-notification >/dev/null 2>&1 && (timeout 2 termux-notification --title "Termux İndirici - Samiullah Dilsuz" --content "$1" >/dev/null 2>&1 &) ; true; }
@@ -161,7 +163,7 @@ elif echo "$URL" | grep -Eq 'youtube\.com|youtu\.be'; then
         *) FORMAT="bestvideo[height<=720]+bestaudio/best[height<=720]" ;;
     esac
     notify "YouTube indiriliyor..."
-    EXTRA_ARGS=()
+    EXTRA_ARGS=("${YT_COOKIE_ARGS[@]}")
     download_with_format "$URL" "$DOWNLOAD_DIR/YouTube/%(title).80s.%(ext)s"
     notify "YouTube tamamlandı ✅"
 
