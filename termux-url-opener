@@ -1,0 +1,931 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux Otomatik Indirici v3 - Samiullah Dilsuz
+#  - Paylasim modu : bir linki "Paylas > Termux" ile gonderince otomatik calisir (soru sormaz)
+#  - Manuel mod    : terminalde `indir` yaz (ya da argumansiz calistir) -> menu acilir
+REPO_USER="semih155"
+REPO_NAME="termux-downloader"
+BRANCH="main"
+RAW="https://raw.githubusercontent.com/$REPO_USER/$REPO_NAME/$BRANCH"
+
+VERSION_FILE="$HOME/.termux-downloader-version"
+CONF="$HOME/.termux-downloader.conf"
+COL_FILE="$HOME/.termux-downloader-collections"
+FAILED_FILE="$HOME/.termux-downloader-failed.txt"
+LOGF="$HOME/.termux-downloader-last.log"
+COOKIES_FILE="$HOME/twitter_cookies.txt"
+TIKTOK_COOKIES="$HOME/.tiktok_cookies.txt"
+COOKIE_DIR="$HOME/.termux-downloader-cookies"
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
+
+# ---------------------------------------------------------------- ayarlar
+DOWNLOAD_DIR="$HOME/storage/downloads/TermuxIndirilenler"
+RETRIES=4                   # her indirme icin deneme sayisi
+WIFI_ONLY=0                 # 1 = sadece Wi-Fi'de indir
+ARTIST="Samiullah Dilsuz"   # mp3/mp4 "sanatci" etiketi
+AUTO_YTDLP_UPDATE=1         # hata olunca yt-dlp'yi guncelle
+SHARE_TYPE=video            # paylasim modunda TikTok turu: video | audio
+MANUAL_TYPE=ask             # manuel link icin: ask | video | audio | both
+COMPAT_MODE=1              # 1 = videolari her telefonda oynayan H.264+AAC mp4 yap
+DEFAULT_QUALITY=360        # kalite menusunde Enter: 360 | 480 | 720 | 1080 | best
+PARALLEL=16                # ayni anda indirilen parca sayisi (hiz)
+ARIA2=0                    # 1 = aria2c ile cok baglantili indirme (pkg install aria2)
+[ -f "$CONF" ] && . "$CONF"
+case "$RETRIES" in ''|*[!0-9]*) RETRIES=4 ;; esac
+[ "$RETRIES" -lt 1 ] && RETRIES=1
+MUSIC_DIR="$DOWNLOAD_DIR/Muzik"
+
+RAW_INPUT="$1"
+INTERACTIVE=1
+ANY_FAIL=0
+YTDLP_UPDATED=0
+EXTRA_ARGS=()
+LIST_ARGS=()
+V_ARCH=""
+A_ARCH=""
+FORMAT="bestvideo+bestaudio/best"
+PT="download:⬇️  %(progress._percent_str)s | Hız: %(progress._speed_str)s | Kalan: %(progress._eta_str)s"
+
+echo -ne "\033]0;Samiullah Dilsuz - Termux Indirici\007"
+
+# ---------------------------------------------------------------- yardimcilar
+notify() { command -v termux-notification >/dev/null 2>&1 && (timeout 2 termux-notification --title "Termux İndirici - Samiullah Dilsuz" --content "$1" >/dev/null 2>&1 &) ; true; }
+
+cfg_set() {  # cfg_set ANAHTAR DEGER  (dosyaya yazar ve hemen uygular)
+    local k="$1" v="$2"
+    touch "$CONF"
+    grep -v "^$k=" "$CONF" > "$CONF.tmp" 2>/dev/null
+    printf '%s=%q\n' "$k" "$v" >> "$CONF.tmp"
+    mv "$CONF.tmp" "$CONF"
+    printf -v "$k" '%s' "$v"
+    MUSIC_DIR="$DOWNLOAD_DIR/Muzik"
+}
+
+sanitize() { printf '%s' "$1" | tr '/\\:*?"<>|\n' '_________' | sed 's/^[ .]*//; s/[ .]*$//'; }
+
+type_label() {
+    case "$1" in
+        video) echo "Video" ;;
+        audio) echo "Müzik (mp3)" ;;
+        both)  echo "Video + mp3" ;;
+        *)     echo "Her seferinde sor" ;;
+    esac
+}
+
+choose_type() {  # $1=1 ise "her seferinde sor" secenegi de gosterilir -> CHOSEN_TYPE
+    echo "Nasıl indirilsin?"
+    echo "  1) Video (mp4)"
+    echo "  2) Müzik (mp3)"
+    echo "  3) İkisi birden (video + mp3)"
+    [ "$1" = 1 ] && echo "  4) Her seferinde sor"
+    read -r -p "Seçim: " _s
+    case "$_s" in
+        2) CHOSEN_TYPE=audio ;;
+        3) CHOSEN_TYPE=both ;;
+        4) if [ "$1" = 1 ]; then CHOSEN_TYPE=ask; else CHOSEN_TYPE=video; fi ;;
+        *) CHOSEN_TYPE=video ;;
+    esac
+}
+
+pause() { read -r -p "Devam etmek için Enter'a bas..." _; }
+
+# ---------------------------------------------------------------- ag kontrolu
+has_internet() {
+    curl -s -o /dev/null --max-time 5 https://www.gstatic.com/generate_204 2>/dev/null \
+    || curl -s -o /dev/null --max-time 5 https://1.1.1.1 2>/dev/null \
+    || curl -s -o /dev/null --max-time 5 https://github.com 2>/dev/null
+}
+
+wait_for_internet() {  # $1 = en fazla kac saniye beklensin (varsayilan 300)
+    has_internet && return 0
+    local max="${1:-300}" i=0
+    echo "🌐 İnternet yok, bağlantı bekleniyor (en fazla $((max/60)) dk). İndirme gelince kaldığı yerden devam eder..."
+    while [ "$((i*5))" -lt "$max" ]; do
+        sleep 5
+        if has_internet; then echo "✅ Bağlantı geldi."; return 0; fi
+        i=$((i+1))
+    done
+    echo "⚠️ Bağlantı gelmedi, yine de deneniyor..."
+    return 0
+}
+
+wifi_connected() {
+    command -v termux-wifi-connectioninfo >/dev/null 2>&1 || return 0
+    local o
+    o=$(timeout 6 termux-wifi-connectioninfo 2>/dev/null) || return 0
+    [ -z "$o" ] && return 0
+    echo "$o" | grep -q '"supplicant_state": *"COMPLETED"'
+}
+
+wifi_gate() {
+    [ "$WIFI_ONLY" = 1 ] || return 0
+    wifi_connected && return 0
+    echo "📶 Wi-Fi bağlı değil (\"Sadece Wi-Fi\" ayarı açık). 2 dk bekleniyor..."
+    local i=0
+    while [ "$i" -lt 12 ]; do
+        sleep 10
+        wifi_connected && return 0
+        i=$((i+1))
+    done
+    read -r -p "1) Mobil veriyle indir  2) Vazgeç [2]: " _w
+    [ "$_w" = 1 ] && return 0
+    return 1
+}
+
+update_ytdlp() {
+    YTDLP_UPDATED=1
+    echo "⬆️  yt-dlp güncelleniyor..."
+    pip install -U yt-dlp yt-dlp-ejs -q 2>/dev/null || echo "(yt-dlp güncellenemedi, devam ediliyor)"
+}
+
+media_scan() {
+    command -v termux-media-scan >/dev/null 2>&1 || return 0
+    local d
+    d=$(readlink -f "$DOWNLOAD_DIR" 2>/dev/null || echo "$DOWNLOAD_DIR")
+    timeout 20 termux-media-scan -r "$d" >/dev/null 2>&1
+    return 0
+}
+
+
+# Varsayilan kalitenin format karsiligi
+default_fmt() {
+    case "$DEFAULT_QUALITY" in 480|720|1080) vfmt "$DEFAULT_QUALITY" ;; best) vfmt "" ;; *) vfmt 360 ;; esac
+}
+
+# Uyumlu (H.264 + AAC) format secici. $1 = en fazla yukseklik (bos = sinirsiz)
+vfmt() {
+    local h=""
+    [ -n "$1" ] && h="[height<=$1]"
+    if [ "$COMPAT_MODE" = 1 ]; then
+        echo "bestvideo[vcodec^=avc1]${h}+bestaudio[acodec^=mp4a]/best[ext=mp4]${h}/bestvideo${h}+bestaudio/best${h}"
+    else
+        echo "bestvideo${h}+bestaudio/best${h}"
+    fi
+}
+
+# Indirilen videolari kontrol et; H.264/AAC/yuv420p mp4 degilse cevir. $1 = isaret dosyasi (bu islemden sonra olusanlar)
+fix_compat() {
+    [ "$COMPAT_MODE" = 1 ] || return 0
+    command -v ffprobe >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1 || return 0
+    [ -f "$1" ] || return 0
+    local f vc ac pf out final ext
+    local vopts aopts
+    while IFS= read -r -d '' f; do
+        vc=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$f" 2>/dev/null | head -1)
+        [ -z "$vc" ] && continue
+        ac=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$f" 2>/dev/null | head -1)
+        pf=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$f" 2>/dev/null | head -1)
+        ext="${f##*.}"; ext="${ext,,}"
+        if [ "$vc" = h264 ] && { [ -z "$ac" ] || [ "$ac" = aac ]; } && [ "$pf" = yuv420p ] && [[ "$ext" =~ ^(mp4|m4v|mov)$ ]]; then
+            continue
+        fi
+        echo "🎞️  Her telefonda oynaması için çevriliyor: $(basename "$f")  [$vc/${ac:-ses yok}]"
+        out="${f%.*}.compat.mp4"
+        vopts=(-c:v copy)
+        if [ "$vc" != h264 ] || [ "$pf" != yuv420p ]; then
+            vopts=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        fi
+        aopts=(-c:a copy)
+        if [ -n "$ac" ] && [ "$ac" != aac ]; then aopts=(-c:a aac -b:a 192k); fi
+        if ffmpeg -nostdin -v error -stats -y -i "$f" -map 0:v:0 -map '0:a:0?' -map_metadata 0 \
+                "${vopts[@]}" "${aopts[@]}" -movflags +faststart "$out" </dev/null; then
+            final="${f%.*}.mp4"
+            mv -f "$out" "$final"
+            [ "$f" != "$final" ] && rm -f "$f"
+            echo "   ✅ Tamam"
+        else
+            rm -f "$out"
+            echo "   ⚠️  Çevrilemedi, dosya olduğu gibi bırakıldı."
+        fi
+    done < <(find "$DOWNLOAD_DIR" -type f -newer "$1" \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' -o -iname '*.mov' -o -iname '*.m4v' \) \
+                 -not -name '*.compat.mp4' -not -path "$MUSIC_DIR/*" -print0 2>/dev/null)
+}
+
+# ---------------------------------------------------------------- yt-dlp + tekrar deneme
+build_common() {
+    COMMON=(--no-warnings --newline --progress-template "$PT"
+        --continue --concurrent-fragments "$PARALLEL"
+        --retries 20 --fragment-retries 20
+        --retry-sleep http:exp=1:20 --retry-sleep fragment:exp=1:20
+        --socket-timeout 20
+        --embed-metadata --no-mtime
+        --parse-metadata "${ARTIST}%(x|)s:%(artist)s"
+        --parse-metadata "${ARTIST}%(x|)s:%(album_artist)s")
+    if command -v node >/dev/null 2>&1; then
+        if [ -z "$YT_JS_OK" ]; then
+            if yt-dlp --help 2>/dev/null | grep -q -- '--js-runtimes'; then YT_JS_OK=1; else YT_JS_OK=0; fi
+        fi
+        [ "$YT_JS_OK" = 1 ] && COMMON+=(--js-runtimes node)
+    fi
+    if [ "$ARIA2" = 1 ] && command -v aria2c >/dev/null 2>&1; then
+        COMMON+=(--downloader aria2c --downloader "dash,m3u8:native")
+    fi
+    AUDIO_ARGS=(-x --audio-format mp3 --audio-quality 0 --embed-thumbnail --convert-thumbnails jpg)
+}
+
+login_hint() {
+    if grep -qi 'youtube' "$LOGF"; then
+        echo "🔒 YouTube \"bot değilsin\" engeli koydu. Sırayla dene:"
+        echo "   1) VPN'i kapat ya da başka ülkeye geç (VPN IP'leri sık engellenir)"
+        echo "   2) Termux'ta:  pkg install nodejs   (YouTube için gerekebilir)"
+        echo "   3) Manuel menü > Site çerezleri > YouTube (YEDEK hesapla çerez ekle)"
+    elif grep -qi 'tiktok' "$LOGF"; then
+        echo "🔒 TikTok girişi gerekiyor olabilir."
+        echo "   Manuel menü > TikTok hesabı bölümünden sessionid'yi yenile."
+    else
+        echo "🔒 Bu içerik için giriş gerekiyor olabilir."
+        echo "   Manuel menü > Site çerezleri bölümünden o siteye çerez ekle."
+    fi
+}
+
+# Donus kodlari: 0 tamam | 2 Wi-Fi yok/vazgecildi | 4 URL desteklenmiyor | 5 giris gerekiyor | diger: yt-dlp hata kodu
+ytdlp_retry() {
+    local attempt=1 rc=1 w drops=0
+    build_common
+    while [ "$attempt" -le "$RETRIES" ]; do
+        wifi_gate || return 2
+        wait_for_internet
+        [ "$attempt" -gt 1 ] && echo "🔁 Yeniden deneniyor ($attempt/$RETRIES)..."
+        yt-dlp "${COMMON[@]}" "${EXTRA_ARGS[@]}" "$@" 2>&1 | tee "$LOGF"
+        rc=${PIPESTATUS[0]}
+        [ "$rc" -eq 0 ] && return 0
+        if grep -qi 'Unsupported URL' "$LOGF"; then return 4; fi
+        if grep -Eqi 'log ?in|logged in|sign in|private video|sessionid' "$LOGF"; then
+            login_hint
+            return 5
+        fi
+        if ! has_internet; then
+            drops=$((drops + 1))
+            if [ "$drops" -le 30 ]; then
+                echo "📡 Bağlantı koptu. Gelince kaldığı yerden devam edilecek (kısmi dosya korunuyor)..."
+                wait_for_internet 3600
+                continue
+            fi
+        fi
+        [ "$attempt" -ge "$RETRIES" ] && break
+        if [ "$attempt" -eq 2 ] && [ "$AUTO_YTDLP_UPDATE" = 1 ] && [ "$YTDLP_UPDATED" = 0 ]; then
+            update_ytdlp
+        fi
+        w=$((3 * (1 << (attempt - 1)))); [ "$w" -gt 30 ] && w=30
+        echo "⚠️  Hata (kod $rc). $w sn sonra tekrar denenecek..."
+        sleep "$w"
+        attempt=$((attempt + 1))
+    done
+    return "$rc"
+}
+
+# fetch URL TUR VIDEO_SABLONU SES_SABLONU   (URL "@FILE:yol" ise listeden indirir)
+fetch() {
+    local url="$1" type="$2" vtpl="$3" atpl="$4" rc=0 r2=0
+    local src=("$url") va=() aa=()
+    case "$url" in @FILE:*) src=(-a "${url#@FILE:}") ;; esac
+    [ "$FORMAT" = "AUDIO_ONLY" ] && type=audio
+    if [ "$type" = "video" ] || [ "$type" = "both" ]; then
+        va=()
+        if [ -n "$V_ARCH" ]; then mkdir -p "$(dirname "$V_ARCH")"; va=(--download-archive "$V_ARCH" --ignore-errors); fi
+        ytdlp_retry "${LIST_ARGS[@]}" "${va[@]}" -f "$FORMAT" --merge-output-format mp4 -o "$vtpl" "${src[@]}"
+        rc=$?
+        [ "$rc" -eq 4 ] && return 4
+    fi
+    if [ "$type" = "audio" ] || [ "$type" = "both" ]; then
+        aa=()
+        if [ -n "$A_ARCH" ]; then mkdir -p "$(dirname "$A_ARCH")"; aa=(--download-archive "$A_ARCH" --ignore-errors); fi
+        build_common
+        ytdlp_retry "${LIST_ARGS[@]}" "${aa[@]}" "${AUDIO_ARGS[@]}" -o "$atpl" "${src[@]}"
+        r2=$?
+        [ "$rc" -eq 0 ] && rc=$r2
+    fi
+    return "$rc"
+}
+
+add_failed() { local line="$2|$1"; grep -qxF "$line" "$FAILED_FILE" 2>/dev/null || echo "$line" >> "$FAILED_FILE"; }
+
+finish_job() {  # finish_job RC URL TUR ETIKET
+    local rc="$1" url="$2" type="$3" label="$4"
+    [ "$type" != "audio" ] && fix_compat "$JOB_MARK"
+    media_scan
+    if [ "$rc" -eq 0 ]; then notify "$label tamamlandı ✅"; return 0; fi
+    ANY_FAIL=1
+    if [ "$rc" -eq 5 ]; then notify "$label: giriş gerekiyor ⚠️"; return "$rc"; fi
+    add_failed "$url" "$type"
+    notify "$label indirilemedi ❌"
+    echo "❌ İndirilemedi. Link 'başarısızlar' listesine eklendi (manuel menüden tekrar denenebilir)."
+    return "$rc"
+}
+
+# ---------------------------------------------------------------- kalite menusu
+quality_menu() {
+    echo "  1) 360p"
+    echo "  2) 480p"
+    echo "  3) 720p"
+    echo "  4) 1080p"
+    echo "  5) En yüksek kalite (best)"
+    echo "  6) Sadece ses (mp3)"
+    local dq="${DEFAULT_QUALITY}p"; [ "$DEFAULT_QUALITY" = best ] && dq="en yüksek"
+    read -r -p "Seçim (1-6, Enter = $dq): " secim
+    case "$secim" in
+        1) FORMAT="$(vfmt 360)" ;;
+        2) FORMAT="$(vfmt 480)" ;;
+        3) FORMAT="$(vfmt 720)" ;;
+        4) FORMAT="$(vfmt 1080)" ;;
+        5) FORMAT="$(vfmt "")" ;;
+        6) FORMAT="AUDIO_ONLY" ;;
+        *) FORMAT="$(default_fmt)" ;;
+    esac
+}
+
+get_format_for_url() {
+    local url="$1" duration dur_int
+    FORMAT="$(vfmt "")"
+    [ "$INTERACTIVE" = 1 ] || return 0
+    duration=$(timeout 40 yt-dlp --no-warnings --socket-timeout 15 "${EXTRA_ARGS[@]}" --print duration "$url" 2>/dev/null | tail -1)
+    if [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        dur_int=${duration%.*}
+        if [ "$dur_int" -gt 300 ]; then
+            echo
+            echo "⏱  Video uzunluğu: $((dur_int/60)) dk $((dur_int%60)) sn (5 dakikadan uzun)"
+            echo "Hangi kalitede indirmek istersin?"
+            quality_menu
+        fi
+    fi
+}
+
+use_cookies() {  # use_cookies ANAHTAR  (tiktok, twitter, youtube, facebook, alan.adi)
+    EXTRA_ARGS=()
+    local f="$COOKIE_DIR/$1.txt"
+    if [ ! -f "$f" ]; then
+        case "$1" in
+            tiktok)  f="$TIKTOK_COOKIES" ;;
+            twitter) f="$COOKIES_FILE" ;;
+        esac
+    fi
+    [ -f "$f" ] && EXTRA_ARGS=(--cookies "$f")
+    return 0
+}
+
+# ---------------------------------------------------------------- TikTok koleksiyonlari
+col_id_from_url() { local u="${1%%\?*}"; u="${u%/}"; echo "${u##*-}"; }
+col_name_from_url() {
+    local u="${1%%\?*}" n
+    u="${u%/}"; n="${u##*/}"; n="${n%-*}"
+    python3 -c 'import sys,urllib.parse;print(urllib.parse.unquote(sys.argv[1]))' "$n" 2>/dev/null || echo "$n"
+}
+col_field() {  # col_field ID ALAN_NO
+    [ -f "$COL_FILE" ] || return 0
+    awk -F'|' -v id="$1" -v f="$2" '$1==id{print $f; exit}' "$COL_FILE"
+}
+col_remove() { [ -f "$COL_FILE" ] && { grep -v "^$1|" "$COL_FILE" > "$COL_FILE.tmp"; mv "$COL_FILE.tmp" "$COL_FILE"; }; return 0; }
+col_save() {  # ID AD URL TUR
+    col_remove "$1"
+    printf '%s|%s|%s|%s\n' "$1" "$(printf '%s' "$2" | tr '|' '_')" "$3" "$4" >> "$COL_FILE"
+}
+col_set_type() { awk -F'|' -v OFS='|' -v id="$1" -v t="$2" '$1==id{$4=t}1' "$COL_FILE" > "$COL_FILE.tmp" && mv "$COL_FILE.tmp" "$COL_FILE"; }
+
+# yt-dlp koleksiyonu desteklemezse: TikTok'un kendi web servisinden video listesini cek (yedek yontem)
+collection_list_fallback() {  # ID COOKIE_DOSYASI CIKTI_DOSYASI
+    python3 - "$1" "$2" "$3" <<'PY'
+import sys, json, urllib.request, urllib.parse
+cid, cj, out = sys.argv[1:4]
+ck = []
+try:
+    for line in open(cj):
+        if line.startswith('#') or not line.strip():
+            continue
+        p = line.rstrip('\n').split('\t')
+        if len(p) >= 7:
+            ck.append(p[5] + '=' + p[6])
+except Exception:
+    pass
+hdr = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Referer": "https://www.tiktok.com/",
+    "Cookie": "; ".join(ck),
+}
+urls, seen, cursor = [], set(), 0
+for _ in range(300):
+    q = urllib.parse.urlencode({"aid": "1988", "app_name": "tiktok_web", "device_platform": "web_pc",
+                                "collectionId": cid, "count": "30", "cursor": str(cursor), "sourceType": "113"})
+    try:
+        req = urllib.request.Request("https://www.tiktok.com/api/collection/item_list/?" + q, headers=hdr)
+        d = json.loads(urllib.request.urlopen(req, timeout=20).read().decode() or "{}")
+    except Exception as e:
+        print("TikTok servis hatası:", e, file=sys.stderr)
+        break
+    items = d.get("itemList") or []
+    for it in items:
+        vid = it.get("id")
+        au = (it.get("author") or {}).get("uniqueId") or "_"
+        if vid and vid not in seen:
+            seen.add(vid)
+            urls.append("https://www.tiktok.com/@%s/video/%s" % (au, vid))
+    if not d.get("hasMore") or not items:
+        break
+    nc = d.get("cursor")
+    if nc is None or str(nc) == str(cursor):
+        break
+    cursor = nc
+open(out, "w").write("\n".join(urls) + ("\n" if urls else ""))
+print(len(urls))
+PY
+}
+
+job_collection() {  # URL TUR
+    local url="$1" type="$2" id name sname adet rc lf n
+    id=$(col_id_from_url "$url")
+    name=$(col_field "$id" 2)
+    [ -z "$name" ] && name=$(col_name_from_url "$url")
+    [ -z "$name" ] && name="Koleksiyon"
+    sname=$(sanitize "$name")
+    [ -z "$sname" ] && sname="Koleksiyon"
+    echo ">> TikTok koleksiyonu: $name  [$(type_label "$type")]"
+    notify "TikTok koleksiyonu indiriliyor: $name"
+    use_cookies tiktok
+    [ -f "$TIKTOK_COOKIES" ] || echo "ℹ️  TikTok girişi yok; özel klasörler için manuel menüden giriş yap."
+    FORMAT="best/bestvideo+bestaudio"
+    LIST_ARGS=()
+    if [ "$INTERACTIVE" = 1 ]; then
+        read -r -p "Kaç video indirilsin? (hepsi için Enter): " adet
+        if [[ "$adet" =~ ^[0-9]+$ ]] && [ "$adet" -gt 0 ]; then LIST_ARGS+=(--playlist-end "$adet"); fi
+    fi
+    V_ARCH="$DOWNLOAD_DIR/TikTok/Koleksiyonlar/$sname/.indirilenler.txt"
+    A_ARCH="$MUSIC_DIR/TikTok/$sname/.indirilenler.txt"
+    local vtpl="$DOWNLOAD_DIR/TikTok/Koleksiyonlar/$sname/%(upload_date)s - %(title).60s.%(ext)s"
+    local atpl="$MUSIC_DIR/TikTok/$sname/%(title).80s.%(ext)s"
+    fetch "$url" "$type" "$vtpl" "$atpl"; rc=$?
+    if [ "$rc" -eq 4 ]; then
+        echo "ℹ️  yt-dlp bu koleksiyon linkini tanımadı, TikTok servisinden liste çekiliyor..."
+        lf="$HOME/.termux-downloader-list.txt"
+        n=$(collection_list_fallback "$id" "$TIKTOK_COOKIES" "$lf" 2>&1 | tail -1)
+        if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt 0 ]; then
+            echo "📃 $n video bulundu."
+            fetch "@FILE:$lf" "$type" "$vtpl" "$atpl"; rc=$?
+        else
+            echo "❌ Koleksiyon listesi alınamadı. TikTok girişini (sessionid) yenile ve tekrar dene."
+            rc=5
+        fi
+    fi
+    V_ARCH=""; A_ARCH=""
+    finish_job "$rc" "$url" "$type" "Koleksiyon"
+}
+
+job_profile() {  # URL TUR
+    local url="$1" type="$2" adet sira only_new arch rc
+    LIST_ARGS=()
+    FORMAT="best/bestvideo+bestaudio"
+    echo ">> TikTok PROFİL tespit edildi. [$(type_label "$type")]"
+    V_ARCH="$DOWNLOAD_DIR/TikTok/indirilenler.txt"
+    A_ARCH="$MUSIC_DIR/TikTok/indirilenler.txt"
+    use_cookies tiktok
+    if [ "$INTERACTIVE" = 1 ]; then
+        echo
+        read -r -p "Kaç video indirmek istersin? (hepsi için Enter'a bas): " adet
+        echo
+        echo "Hangi sıradan indirilsin?"
+        echo "  1) Yeni videolardan eskiye doğru (varsayılan)"
+        echo "  2) Eski videolardan yeniye doğru"
+        read -r -p "Seçim (1-2): " sira
+        if [[ "$adet" =~ ^[0-9]+$ ]] && [ "$adet" -gt 0 ]; then LIST_ARGS+=(--playlist-end "$adet"); fi
+        [ "$sira" = "2" ] && LIST_ARGS+=(--playlist-reverse)
+        arch="$V_ARCH"; [ "$type" = "audio" ] && arch="$A_ARCH"
+        if [ "$sira" != "2" ] && [ -s "$arch" ]; then
+            read -r -p "Sadece yeni videolar indirilsin mi? (daha önce indirilene gelince dur) (e/H): " only_new
+            case "$only_new" in e|E|evet) LIST_ARGS+=(--break-on-existing) ;; esac
+        fi
+    fi
+    notify "TikTok profili toplu indiriliyor..."
+    fetch "$url" "$type" \
+        "$DOWNLOAD_DIR/TikTok/%(uploader)s/%(upload_date)s - %(title).60s.%(ext)s" \
+        "$MUSIC_DIR/TikTok/%(uploader)s/%(upload_date)s - %(title).60s.%(ext)s"
+    rc=$?
+    V_ARCH=""; A_ARCH=""
+    finish_job "$rc" "$url" "$type" "TikTok profili"
+}
+
+# ---------------------------------------------------------------- ana is akisi
+process_url() {  # URL TUR
+    local url="$1" type="$2" rc=0 SITE
+    EXTRA_ARGS=(); LIST_ARGS=(); V_ARCH=""; A_ARCH=""
+    JOB_MARK="$HOME/.termux-downloader-mark"; touch -d '3 seconds ago' "$JOB_MARK" 2>/dev/null || touch "$JOB_MARK"
+    if echo "$url" | grep -Eq 'tiktok\.com/@[^/]+/collection/'; then
+        job_collection "$url" "$type"; return $?
+    elif echo "$url" | grep -Eq 'tiktok\.com/@[^/]+/?($|\?)'; then
+        job_profile "$url" "$type"; return $?
+    elif echo "$url" | grep -Eq 'tiktok\.com'; then
+        echo ">> TikTok - en yüksek kalitede indiriliyor... [$(type_label "$type")]"
+        notify "TikTok indiriliyor..."
+        use_cookies tiktok
+        FORMAT="best/bestvideo+bestaudio"
+        fetch "$url" "$type" "$DOWNLOAD_DIR/TikTok/%(title).80s.%(ext)s" "$MUSIC_DIR/TikTok/%(title).80s.%(ext)s"; rc=$?
+        finish_job "$rc" "$url" "$type" "TikTok"
+    elif echo "$url" | grep -Eq 'facebook\.com|fb\.watch'; then
+        echo ">> Facebook - en yüksek kalitede indiriliyor... [$(type_label "$type")]"
+        notify "Facebook indiriliyor..."
+        use_cookies facebook
+        FORMAT="$(vfmt "")"
+        fetch "$url" "$type" "$DOWNLOAD_DIR/Facebook/%(title).80s.%(ext)s" "$MUSIC_DIR/Facebook/%(title).80s.%(ext)s"; rc=$?
+        finish_job "$rc" "$url" "$type" "Facebook"
+    elif echo "$url" | grep -Eq 'twitter\.com|x\.com'; then
+        echo ">> Twitter/X [$(type_label "$type")]"
+        notify "Twitter/X indiriliyor..."
+        use_cookies twitter
+        FORMAT="$(vfmt "")"
+        [ "$type" != "audio" ] && get_format_for_url "$url"
+        fetch "$url" "$type" "$DOWNLOAD_DIR/Twitter/%(uploader)s - %(title).60s.%(ext)s" "$MUSIC_DIR/Twitter/%(uploader)s - %(title).60s.%(ext)s"; rc=$?
+        finish_job "$rc" "$url" "$type" "Twitter/X"
+    elif echo "$url" | grep -Eq 'youtube\.com|youtu\.be'; then
+        echo ">> YouTube [$(type_label "$type")]"
+        FORMAT="$(default_fmt)"
+        if [ "$type" != "audio" ] && [ "$INTERACTIVE" = 1 ]; then quality_menu; fi
+        [ "$FORMAT" = "AUDIO_ONLY" ] && type=audio
+        notify "YouTube indiriliyor..."
+        use_cookies youtube
+        EXTRA_ARGS+=(-4)
+        fetch "$url" "$type" "$DOWNLOAD_DIR/YouTube/%(title).80s.%(ext)s" "$MUSIC_DIR/YouTube/%(title).80s.%(ext)s"; rc=$?
+        finish_job "$rc" "$url" "$type" "YouTube"
+    else
+        echo ">> Genel site [$(type_label "$type")]"
+        notify "Video indiriliyor..."
+        SITE=$(echo "$url" | sed -E 's~^https?://(www\.)?([^/?#]+).*~\2~')
+        use_cookies "$SITE"
+        FORMAT="$(vfmt "")"
+        [ "$type" != "audio" ] && get_format_for_url "$url"
+        [ "$FORMAT" = "AUDIO_ONLY" ] && type=audio
+        fetch "$url" "$type" "$DOWNLOAD_DIR/$SITE/%(title).80s.%(ext)s" "$MUSIC_DIR/$SITE/%(title).80s.%(ext)s"; rc=$?
+        finish_job "$rc" "$url" "$type" "İndirme"
+    fi
+    return $?
+}
+
+extract_url() {
+    local u
+    u=$(printf '%s\n' "$1" | grep -oE 'https?://[^[:space:]]+' | head -1)
+    [ -z "$u" ] && u="$1"
+    printf '%s' "$u"
+}
+
+# ---------------------------------------------------------------- guncelleme
+install_copies() {  # calisan scripti hem ~/bin (Paylas menusu) hem ~/.shortcuts icine koy
+    local d
+    mkdir -p "$HOME/bin" "$HOME/.shortcuts"
+    for d in "$HOME/bin/termux-url-opener" "$HOME/.shortcuts/termux-url-opener"; do
+        if [ "$(readlink -f "$d" 2>/dev/null)" != "$SELF" ]; then
+            cp "$SELF" "$d.tmp" && mv "$d.tmp" "$d" && chmod +x "$d"
+        fi
+    done
+    ln -sf "$HOME/bin/termux-url-opener" "$HOME/bin/indir"
+    [ -n "$PREFIX" ] && ln -sf "$HOME/bin/termux-url-opener" "$PREFIX/bin/indir"
+}
+
+check_update() {  # $1=force
+    command -v curl >/dev/null 2>&1 || return 0
+    local LAST_CHECK_FILE="$HOME/.termux-downloader-lastcheck" NOW LAST_CHECK REMOTE_VERSION LOCAL_VERSION
+    NOW=$(date +%s)
+    LAST_CHECK=$(cat "$LAST_CHECK_FILE" 2>/dev/null || echo 0)
+    if [ "$1" != "force" ] && [ $((NOW - LAST_CHECK)) -lt 86400 ]; then return 0; fi
+    echo "$NOW" > "$LAST_CHECK_FILE"
+    REMOTE_VERSION=$(curl -sL --max-time 4 "$RAW/VERSION" 2>/dev/null || echo "")
+    [ -z "$REMOTE_VERSION" ] && return 0
+    LOCAL_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "0")
+    if [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
+        echo "🔄 Güncelleme bulundu ($LOCAL_VERSION -> $REMOTE_VERSION)..."
+        if curl -sL --max-time 30 "$RAW/termux-url-opener" -o "$SELF.tmp" && head -1 "$SELF.tmp" | grep -q '^#!'; then
+            mv "$SELF.tmp" "$SELF"; chmod +x "$SELF"
+            echo "$REMOTE_VERSION" > "$VERSION_FILE"
+            SELF="$SELF" install_copies
+            echo "✅ Güncellendi, yeniden başlatılıyor..."
+            exec bash "$SELF" ${RAW_INPUT:+"$RAW_INPUT"}
+        else
+            rm -f "$SELF.tmp"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------- menuler
+banner() {
+    echo "══════════════════════════════════════"
+    echo "   TERMUX OTOMATİK İNDİRİCİ"
+    echo "   v$(cat "$VERSION_FILE" 2>/dev/null || echo 3.0.0)"
+    echo "   Geliştirici: Samiullah Dilsuz"
+    echo "══════════════════════════════════════"
+}
+
+menu_link() {
+    local in url type
+    read -r -p "Link (yapıştır): " in
+    url=$(extract_url "$in")
+    [ -z "$url" ] && return
+    type="$MANUAL_TYPE"
+    local cid
+    cid=$(col_id_from_url "$url")
+    if echo "$url" | grep -Eq 'tiktok\.com/@[^/]+/collection/'; then
+        local saved; saved=$(col_field "$cid" 4)
+        [ -n "$saved" ] && type="$saved"
+    fi
+    if [ "$type" = "ask" ] || [ -z "$type" ]; then choose_type 0; type="$CHOSEN_TYPE"; fi
+    INTERACTIVE=1
+    process_url "$url" "$type"
+    echo; pause
+}
+
+col_actions() {  # "id|ad|url|tur"
+    local id name url ctype
+    IFS='|' read -r id name url ctype <<< "$1"
+    while true; do
+        echo
+        echo "── $name  [$(type_label "$ctype")] ──"
+        echo "  1) İndir"
+        echo "  2) Türü değiştir (hatırlanır)"
+        echo "  3) Listeden sil"
+        echo "  0) Geri"
+        read -r -p "Seçim: " s
+        case "$s" in
+            1)
+                local t="$ctype"
+                if [ "$t" = "ask" ]; then
+                    choose_type 0; t="$CHOSEN_TYPE"
+                    read -r -p "Bu klasör için hep böyle olsun mu? (e/H): " k
+                    case "$k" in e|E|evet) col_set_type "$id" "$t"; ctype="$t" ;; esac
+                fi
+                INTERACTIVE=1
+                process_url "$url" "$t"
+                echo; pause ;;
+            2)
+                choose_type 1; col_set_type "$id" "$CHOSEN_TYPE"; ctype="$CHOSEN_TYPE"
+                echo "✅ Kaydedildi: $(type_label "$ctype")" ;;
+            3)
+                read -r -p "Silinsin mi? (e/H): " k
+                case "$k" in e|E|evet) col_remove "$id"; return ;; esac ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+col_add_interactive() {
+    echo
+    echo "TikTok'ta: Profil > Kaydedilenler (yer imi) > klasörü aç > Paylaş > Bağlantıyı kopyala"
+    local in url id name
+    read -r -p "Klasör linki: " in
+    url=$(extract_url "$in")
+    if ! echo "$url" | grep -Eq 'tiktok\.com/@[^/]+/collection/'; then
+        echo "❌ Bu bir TikTok klasör (collection) linki gibi görünmüyor."; return
+    fi
+    id=$(col_id_from_url "$url")
+    name=$(col_name_from_url "$url")
+    read -r -p "Klasör adı [$name]: " in
+    [ -n "$in" ] && name="$in"
+    choose_type 1
+    col_save "$id" "$name" "$url" "$CHOSEN_TYPE"
+    echo "✅ Eklendi: $name  [$(type_label "$CHOSEN_TYPE")]"
+}
+
+menu_collections() {
+    while true; do
+        echo
+        echo "── TikTok kayıtlı klasörlerim ──"
+        local n=0 id name url ctype
+        if [ -s "$COL_FILE" ]; then
+            while IFS='|' read -r id name url ctype; do
+                n=$((n+1)); printf '  %d) %s  [%s]\n' "$n" "$name" "$(type_label "$ctype")"
+            done < "$COL_FILE"
+        else
+            echo "  (henüz klasör eklenmemiş)"
+        fi
+        echo "  a) Klasör ekle"
+        echo "  0) Geri"
+        read -r -p "Seçim: " s
+        case "$s" in
+            0|"") return ;;
+            a|A) col_add_interactive ;;
+            *)
+                if [[ "$s" =~ ^[0-9]+$ ]] && [ "$s" -ge 1 ] && [ "$s" -le "$n" ]; then
+                    col_actions "$(sed -n "${s}p" "$COL_FILE")"
+                fi ;;
+        esac
+    done
+}
+
+menu_tiktok_login() {
+    while true; do
+        echo
+        echo "── TikTok hesabı ──"
+        if [ -f "$TIKTOK_COOKIES" ]; then echo "Durum: ✅ giriş bilgisi kayıtlı"; else echo "Durum: ❌ giriş yok"; fi
+        echo "  1) sessionid yapıştır (giriş yap)"
+        echo "  2) cookies.txt dosyasından al (dosya yolu)"
+        echo "  3) Çıkış yap (kayıtlı bilgiyi sil)"
+        echo "  4) sessionid nasıl bulunur?"
+        echo "  0) Geri"
+        read -r -p "Seçim: " s
+        case "$s" in
+            1)
+                read -r -p "sessionid: " sid
+                sid=$(printf '%s' "$sid" | tr -d ' "'"'"'\r\n')
+                if [[ "$sid" =~ ^[A-Za-z0-9%_-]{20,}$ ]]; then
+                    local exp=$(( $(date +%s) + 31536000 ))
+                    {
+                        printf '# Netscape HTTP Cookie File\n'
+                        printf '.tiktok.com\tTRUE\t/\tTRUE\t%s\tsessionid\t%s\n' "$exp" "$sid"
+                        printf '.tiktok.com\tTRUE\t/\tTRUE\t%s\tsessionid_ss\t%s\n' "$exp" "$sid"
+                    } > "$TIKTOK_COOKIES"
+                    chmod 600 "$TIKTOK_COOKIES"
+                    echo "✅ Kaydedildi."
+                else
+                    echo "❌ Geçersiz görünüyor (en az 20 harf/rakam olmalı)."
+                fi ;;
+            2)
+                read -r -p "cookies.txt yolu: " f
+                f="${f/#\~/$HOME}"
+                if [ -f "$f" ]; then cp "$f" "$TIKTOK_COOKIES" && chmod 600 "$TIKTOK_COOKIES" && echo "✅ Kaydedildi."; else echo "❌ Dosya bulunamadı."; fi ;;
+            3) rm -f "$TIKTOK_COOKIES"; echo "✅ Silindi." ;;
+            4)
+                echo
+                echo "1) Telefonda/bilgisayarda tarayıcıdan tiktok.com'a gir ve hesabına giriş yap."
+                echo "2) Bilgisayar Chrome: F12 > Application > Cookies > https://www.tiktok.com"
+                echo "   listesinden 'sessionid' satırının Value değerini kopyala."
+                echo "   (Telefonda: Kiwi Browser ya da 'Cookie Editor' eklentisiyle aynısı.)"
+                echo "3) Yukarıdaki 1. seçenekle buraya yapıştır."
+                echo "⚠️  sessionid, hesabına giriş anahtarıdır. Kimseyle paylaşma."
+                echo "   Şifreni bu script hiçbir zaman istemez." ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+onoff() { [ "$1" = 1 ] && echo "açık" || echo "kapalı"; }
+
+menu_settings() {
+    while true; do
+        echo
+        echo "── Ayarlar ──"
+        echo "  1) İndirme klasörü            : $DOWNLOAD_DIR"
+        echo "  2) Tekrar deneme sayısı       : $RETRIES"
+        echo "  3) Sadece Wi-Fi'de indir      : $(onoff "$WIFI_ONLY")"
+        echo "  4) Paylaş modunda TikTok türü : $(type_label "$SHARE_TYPE")"
+        echo "  5) Manuel link türü           : $(type_label "$MANUAL_TYPE")"
+        echo "  6) Sanatçı adı (etiket)       : $ARTIST"
+        echo "  7) yt-dlp otomatik güncelleme : $(onoff "$AUTO_YTDLP_UPDATE")"
+        echo "  8) Varsayılan kalite (Enter)  : $( [ "$DEFAULT_QUALITY" = best ] && echo "en yüksek" || echo "${DEFAULT_QUALITY}p" )"
+        echo "  9) Uyumlu mp4 (H.264+AAC)      : $(onoff "$COMPAT_MODE")"
+        echo "  10) Klasör türlerini düzenle"
+        echo "  11) Paralel parça sayısı (hız) : $PARALLEL"
+        echo "  12) aria2c çoklu bağlantı      : $(onoff "$ARIA2")"
+        echo "  0) Geri"
+        read -r -p "Seçim: " s
+        case "$s" in
+            1) read -r -p "Yeni klasör yolu: " v; v="${v/#\~/$HOME}"; [ -n "$v" ] && cfg_set DOWNLOAD_DIR "$v" ;;
+            2) read -r -p "Kaç kez denensin? (1-10): " v
+               if [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 10 ]; then cfg_set RETRIES "$v"; else echo "Geçersiz."; fi ;;
+            3) if [ "$WIFI_ONLY" = 1 ]; then cfg_set WIFI_ONLY 0; else cfg_set WIFI_ONLY 1; fi ;;
+            4) if [ "$SHARE_TYPE" = audio ]; then cfg_set SHARE_TYPE video; else cfg_set SHARE_TYPE audio; fi ;;
+            5) choose_type 1; cfg_set MANUAL_TYPE "$CHOSEN_TYPE" ;;
+            6) read -r -p "Sanatçı adı: " v; v=$(printf '%s' "$v" | tr -d '%:'); [ -n "$v" ] && cfg_set ARTIST "$v" ;;
+            7) if [ "$AUTO_YTDLP_UPDATE" = 1 ]; then cfg_set AUTO_YTDLP_UPDATE 0; else cfg_set AUTO_YTDLP_UPDATE 1; fi ;;
+            8) echo "  1) 360p   2) 480p   3) 720p   4) 1080p   5) En yüksek"
+               read -r -p "Seçim: " v
+               case "$v" in 1) cfg_set DEFAULT_QUALITY 360 ;; 2) cfg_set DEFAULT_QUALITY 480 ;; 3) cfg_set DEFAULT_QUALITY 720 ;; 4) cfg_set DEFAULT_QUALITY 1080 ;; 5) cfg_set DEFAULT_QUALITY best ;; esac ;;
+            9) if [ "$COMPAT_MODE" = 1 ]; then cfg_set COMPAT_MODE 0; else cfg_set COMPAT_MODE 1; fi ;;
+            10) menu_collections ;;
+            11) read -r -p "Kaç parça aynı anda? (1-32, önerilen 16): " v
+                if [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 32 ]; then cfg_set PARALLEL "$v"; else echo "Geçersiz."; fi ;;
+            12) if [ "$ARIA2" = 1 ]; then cfg_set ARIA2 0
+                elif command -v aria2c >/dev/null 2>&1; then cfg_set ARIA2 1
+                else echo "aria2c kurulu değil. Önce Termux'ta:  pkg install aria2"; fi ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+cookie_import() {  # $1 = anahtar
+    local key="$1" f
+    mkdir -p "$COOKIE_DIR"
+    echo "Tarayıcıdan dışa aktardığın cookies.txt dosyasının yolu"
+    echo "(örnek: ~/storage/downloads/cookies.txt)"
+    read -r -p "Yol: " f
+    f="${f/#\~/$HOME}"
+    if [ ! -f "$f" ]; then echo "❌ Dosya bulunamadı."; return; fi
+    if ! grep -q "$(printf '\t')" "$f"; then echo "❌ Bu bir cookies.txt (Netscape) dosyası gibi görünmüyor."; return; fi
+    cp "$f" "$COOKIE_DIR/$key.txt" && chmod 600 "$COOKIE_DIR/$key.txt" && echo "✅ $key için çerez kaydedildi."
+}
+
+menu_cookies() {
+    local s h f
+    while true; do
+        echo
+        echo "── Site çerezleri ──"
+        if ls "$COOKIE_DIR"/*.txt >/dev/null 2>&1; then
+            for f in "$COOKIE_DIR"/*.txt; do echo "  ✅ $(basename "$f" .txt)"; done
+        else
+            echo "  (henüz çerez yok)"
+        fi
+        echo "  1) YouTube"
+        echo "  2) X (Twitter)"
+        echo "  3) Facebook"
+        echo "  4) Başka site (alan adı yaz)"
+        echo "  5) Çerez sil"
+        echo "  6) Çerez nasıl alınır?"
+        echo "  0) Geri"
+        read -r -p "Seçim: " s
+        case "$s" in
+            1) cookie_import youtube ;;
+            2) cookie_import twitter ;;
+            3) cookie_import facebook ;;
+            4) read -r -p "Site (örn: instagram.com): " h
+               h=$(printf '%s' "$h" | tr 'A-Z' 'a-z' | sed -E 's~^https?://~~; s~^www\.~~; s~[/?#].*~~' | tr -cd 'a-z0-9.-')
+               [ -n "$h" ] && cookie_import "$h" ;;
+            5) read -r -p "Hangisi silinsin? (ör: youtube): " h
+               h=$(printf '%s' "$h" | tr -cd 'A-Za-z0-9.-')
+               [ -n "$h" ] && rm -f "$COOKIE_DIR/$h.txt" && echo "✅ Silindi (varsa)." ;;
+            6)
+                echo
+                echo "1) Tarayıcıda 'Get cookies.txt LOCALLY' eklentisini kur"
+                echo "   (telefonda Kiwi Browser, ya da bilgisayarda Chrome)."
+                echo "2) Siteye giriş yap, eklentiden 'Export' de, dosyayı İndirilenler'e kaydet."
+                echo "3) Buradan dosyanın yolunu yaz."
+                echo "⚠️  Çerez, hesabına giriş anahtarıdır; kimseyle paylaşma."
+                echo "   YouTube için ana hesabını DEĞİL, yedek bir Google hesabı kullan"
+                echo "   (otomatik indirmede hesap kısıtlanabilir)." ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+retry_failed() {
+    if [ ! -s "$FAILED_FILE" ]; then echo "Başarısız indirme yok. 👍"; return; fi
+    local tmp="$FAILED_FILE.run" line type url
+    mv "$FAILED_FILE" "$tmp"
+    INTERACTIVE=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        type="${line%%|*}"; url="${line#*|}"
+        echo; echo "🔁 $url"
+        process_url "$url" "$type"
+    done < "$tmp"
+    rm -f "$tmp"
+    INTERACTIVE=1
+}
+
+menu_main() {
+    while true; do
+        clear
+        banner
+        local nf=0
+        [ -s "$FAILED_FILE" ] && nf=$(grep -c . "$FAILED_FILE")
+        echo "  1) Link yapıştır ve indir"
+        echo "  2) TikTok kayıtlı klasörlerim"
+        echo "  3) Başarısız indirmeleri tekrar dene ($nf)"
+        echo "  4) TikTok hesabı (giriş)"
+        echo "  5) Site çerezleri (YouTube, X, Facebook...)"
+        echo "  6) Ayarlar"
+        echo "  7) Güncelle (script + yt-dlp)"
+        echo "  0) Çıkış"
+        read -r -p "Seçim: " s
+        case "$s" in
+            1) menu_link ;;
+            2) menu_collections ;;
+            3) retry_failed; echo; pause ;;
+            4) menu_tiktok_login ;;
+            5) menu_cookies ;;
+            6) menu_settings ;;
+            7) check_update force; update_ytdlp; echo "✅ Tamam."; pause ;;
+            0|q|"") return ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------- baslangic
+mkdir -p "$DOWNLOAD_DIR"
+
+if [ -z "$RAW_INPUT" ]; then
+    # manuel mod
+    clear; banner
+    check_update
+    menu_main
+    exit 0
+fi
+
+# paylasim (otomatik) modu: soru sormaz
+clear
+banner
+check_update
+URL=$(extract_url "$RAW_INPUT")
+if [ -z "$URL" ]; then echo "Hata: URL alınamadı."; pause; exit 1; fi
+echo "Gelen link: $URL"
+notify "İndirme başlatılıyor..."
+
+TYPE=video
+if echo "$URL" | grep -Eq 'tiktok\.com'; then
+    TYPE="$SHARE_TYPE"
+    if echo "$URL" | grep -Eq 'tiktok\.com/@[^/]+/collection/'; then
+        saved=$(col_field "$(col_id_from_url "$URL")" 4)
+        case "$saved" in video|audio|both) TYPE="$saved" ;; esac
+    fi
+fi
+case "$TYPE" in video|audio|both) ;; *) TYPE=video ;; esac
+
+process_url "$URL" "$TYPE"
+
+if [ "$ANY_FAIL" = 1 ]; then
+    echo
+    pause
+else
+    echo "İşlem bitti — Samiullah Dilsuz | Termux İndirici"
+    sleep 2
+fi
